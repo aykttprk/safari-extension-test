@@ -34,6 +34,18 @@ jobs:
           cat diagnostics/converter.txt
           exit "$RESULT"
 
+      - name: Inspect generated project targets
+        run: |
+          PROJECT=$(cat diagnostics/project-path.txt)
+
+          xcodebuild -list -project "$PROJECT" \
+            | tee diagnostics/targets.txt
+
+          echo "=== Project target definitions ==="
+          grep -nE 'PBXNativeTarget|PRODUCT_BUNDLE_IDENTIFIER|appex|SafariWebExtension' \
+            "$PROJECT/project.pbxproj" \
+            | tee diagnostics/target-details.txt
+
       - name: Find Xcode project and scheme
         run: |
           PROJECT=$(find "$RUNNER_TEMP/SFInspectorTest" -name '*.xcodeproj' -print -quit)
