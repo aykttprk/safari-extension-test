@@ -1,0 +1,62 @@
+
+name: Diagnose Safari Extension Packager
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  diagnose:
+    runs-on: macos-15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Show environment
+        run: |
+          mkdir -p diagnostics
+          {
+            echo "=== macOS ==="
+            sw_vers
+            echo
+            echo "=== Xcode ==="
+            xcodebuild -version
+            echo
+            echo "=== Xcode path ==="
+            xcode-select -p
+          } 2>&1 | tee diagnostics/environment.txt
+
+      - name: Check Safari packager
+        run: |
+          {
+            echo "=== Locate packager ==="
+            xcrun --find safari-web-extension-packager
+            echo
+            echo "=== Packager help ==="
+            xcrun safari-web-extension-packager --help
+          } > diagnostics/packager.txt 2>&1
+          cat diagnostics/packager.txt
+        continue-on-error: true
+
+      - name: List extension files
+        run: |
+          {
+            echo "=== Repository files ==="
+            find . -maxdepth 3 -type f \
+              ! -path './.git/*' \
+              ! -path './.github/*' | sort
+            echo
+            echo "=== Manifest ==="
+            cat manifest.json
+          } > diagnostics/files.txt 2>&1
+        continue-on-error: true
+
+      - name: Upload diagnostic logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: safari-packager-diagnostics
+          path: diagnostics/
+          if-no-files-found: warn
