@@ -296,8 +296,7 @@ jobs:
       - name: Select Xcode 26
         run: |
           set -e
-          ls -d /Applications/Xcode_26*.app
-          sudo xcode-select -s /Applications/Xcode_26.app/Contents/Developer
+          sudo xcode-select -s /Applications/Xcode_26.3.app/Contents/Developer
           xcodebuild -version
           xcodebuild -showsdks
 
