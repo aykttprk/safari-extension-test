@@ -47,6 +47,15 @@ jobs:
           echo "=== Bundle IDs after correction ==="
           grep -n 'PRODUCT_BUNDLE_IDENTIFIER' "$PBXPROJ"
 
+      - name: Inspect project signing configuration
+        run: |
+          PROJECT=$(find "$RUNNER_TEMP/SFInspectorTest" -name '*.xcodeproj' -print -quit)
+          PBXPROJ="$PROJECT/project.pbxproj"
+
+          echo "=== Signing configuration ==="
+          grep -nE 'CODE_SIGN_IDENTITY|CODE_SIGN_STYLE|DEVELOPMENT_TEAM|ProvisioningStyle|PROVISIONING_PROFILE' \
+            "$PBXPROJ" || true
+
       - name: Find Xcode project and scheme
         run: |
           PROJECT=$(find "$RUNNER_TEMP/SFInspectorTest" -name '*.xcodeproj' -print -quit)
