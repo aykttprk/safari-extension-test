@@ -293,6 +293,14 @@ jobs:
               | grep -E 'PRODUCT_BUNDLE_IDENTIFIER =|PRODUCT_NAME =|PRODUCT_TYPE =|CODE_SIGN_STYLE =|CODE_SIGN_IDENTITY =|PROVISIONING_PROFILE_SPECIFIER =|DEVELOPMENT_TEAM ='
           done
 
+      - name: Select Xcode 26
+        run: |
+          set -e
+          ls -d /Applications/Xcode_26*.app
+          sudo xcode-select -s /Applications/Xcode_26.app/Contents/Developer
+          xcodebuild -version
+          xcodebuild -showsdks
+
       - name: Build for iOS Simulator
         run: |
           PROJECT=$(cat diagnostics/project-path.txt)
