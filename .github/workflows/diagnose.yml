@@ -53,6 +53,22 @@ jobs:
           echo "$PROJECT" > diagnostics/project-path.txt
           echo "$SCHEME" > diagnostics/scheme.txt
 
+      - name: Inspect signing targets
+        run: |
+          PROJECT=$(cat diagnostics/project-path.txt)
+
+          xcodebuild \
+            -project "$PROJECT" \
+            -scheme "$(cat diagnostics/scheme.txt)" \
+            -showBuildSettings \
+            > diagnostics/signing-settings.txt 2>&1
+
+          grep -E \
+            '(^| )PRODUCT_BUNDLE_IDENTIFIER =|(^| )PRODUCT_NAME =|(^| )PRODUCT_TYPE =|(^| )DEVELOPMENT_TEAM =|(^| )CODE_SIGN_STYLE =' \
+            diagnostics/signing-settings.txt \
+            | sort -u \
+            | tee diagnostics/signing-summary.txt
+
       - name: Build for iOS Simulator
         run: |
           PROJECT=$(cat diagnostics/project-path.txt)
