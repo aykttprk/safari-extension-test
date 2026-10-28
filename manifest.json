@@ -1,0 +1,13 @@
+{
+  "manifest_version": 3,
+  "name": "Boş Test Eklentisi",
+  "version": "1.0",
+  "description": "App Store Connect test amaçlı basit Safari eklentisi.",
+  "action": {
+    "default_title": "Test Eklentisi",
+    "default_popup": "popup.html"
+  },
+  "icons": {
+    "128": "icon128.png"
+  }
+}
