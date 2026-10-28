@@ -34,6 +34,19 @@ jobs:
           cat diagnostics/converter.txt
           exit "$RESULT"
 
+      - name: Fix Bundle Identifiers
+        run: |
+          PROJECT=$(find "$RUNNER_TEMP/SFInspectorTest" -name '*.xcodeproj' -print -quit)
+          PBXPROJ="$PROJECT/project.pbxproj"
+
+          sed -i '' \
+            -e 's/com\.toprak\.SF-Inspector-Test\.Extension/com.toprak.extensiontest.Extension/g' \
+            -e 's/com\.toprak\.SF-Inspector-Test/com.toprak.extensiontest/g' \
+            "$PBXPROJ"
+
+          echo "=== Bundle IDs after correction ==="
+          grep -n 'PRODUCT_BUNDLE_IDENTIFIER' "$PBXPROJ"
+
       - name: Find Xcode project and scheme
         run: |
           PROJECT=$(find "$RUNNER_TEMP/SFInspectorTest" -name '*.xcodeproj' -print -quit)
