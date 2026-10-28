@@ -1,3 +1,4 @@
+
 name: Build Safari Extension Project
 
 on:
@@ -31,18 +32,52 @@ jobs:
             > diagnostics/converter.txt 2>&1
           RESULT=$?
           cat diagnostics/converter.txt
-          echo "Converter exit code: $RESULT"
-          if [ "$RESULT" -eq 0 ]; then
-            cd "$RUNNER_TEMP"
-            zip -r "$GITHUB_WORKSPACE/diagnostics/SFInspectorTest-project.zip" SFInspectorTest
-          fi
           exit "$RESULT"
 
-      - name: Upload generated project and logs
+      - name: Find Xcode project and scheme
+        run: |
+          PROJECT=$(find "$RUNNER_TEMP/SFInspectorTest" -name '*.xcodeproj' -print -quit)
+          if [ -z "$PROJECT" ]; then
+            echo "Xcode project not found" | tee diagnostics/build.txt
+            exit 1
+          fi
+
+          echo "Project: $PROJECT" | tee diagnostics/build.txt
+          xcodebuild -list -json -project "$PROJECT" \
+            > diagnostics/project-list.json 2>> diagnostics/build.txt
+
+          SCHEME=$(python3 -c \
+            'import json; d=json.load(open("diagnostics/project-list.json")); print(d["project"]["schemes"][0])')
+
+          echo "Scheme: $SCHEME" | tee -a diagnostics/build.txt
+          echo "$PROJECT" > diagnostics/project-path.txt
+          echo "$SCHEME" > diagnostics/scheme.txt
+
+      - name: Build for iOS Simulator
+        run: |
+          PROJECT=$(cat diagnostics/project-path.txt)
+          SCHEME=$(cat diagnostics/scheme.txt)
+
+          set +e
+          xcodebuild \
+            -project "$PROJECT" \
+            -scheme "$SCHEME" \
+            -sdk iphonesimulator \
+            -configuration Debug \
+            -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGNING_ALLOWED=NO \
+            build > diagnostics/build-output.txt 2>&1
+          RESULT=$?
+
+          tail -n 100 diagnostics/build-output.txt
+          echo "Build exit code: $RESULT" | tee diagnostics/build-result.txt
+          exit "$RESULT"
+
+      - name: Upload project and diagnostic logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: safari-extension-project
+          name: safari-extension-build
           path: |
             diagnostics/
             ${{ runner.temp }}/SFInspectorTest/
