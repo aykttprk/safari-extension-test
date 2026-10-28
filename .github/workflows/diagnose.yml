@@ -434,6 +434,29 @@ jobs:
           echo "=== Exported IPA ==="
           ls -lh "$EXPORT_PATH"
 
+          
+      - name: Locate IPA for TestFlight
+        shell: bash
+        run: |
+          set -e
+          IPA_PATH=$(find "$RUNNER_TEMP/export" -maxdepth 1 -name '*.ipa' -print -quit)
+          if [ -z "$IPA_PATH" ]; then
+            echo "ERROR: IPA file not found."
+            exit 1
+          fi
+          echo "IPA_PATH=$IPA_PATH" >> "$GITHUB_ENV"
+          echo "IPA found: $IPA_PATH"
+
+      - name: Upload app to TestFlight
+        uses: apple-actions/upload-testflight-build@v5
+        with:
+          app-path: ${{ env.IPA_PATH }}
+          issuer-id: ${{ vars.APPSTORE_ISSUER_ID }}
+          api-key-id: ${{ vars.APPSTORE_API_KEY_ID }}
+          api-private-key: ${{ secrets.APPSTORE_API_PRIVATE_KEY }}
+          wait-for-processing: 'false'
+
+
       - name: Upload project and diagnostic logs
         if: always()
         uses: actions/upload-artifact@v4
