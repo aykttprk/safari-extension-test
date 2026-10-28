@@ -1,4 +1,3 @@
-
 name: Build Safari Extension Project
 
 on:
@@ -17,7 +16,9 @@ jobs:
 
       - name: Generate Xcode project
         run: |
+          set -e
           mkdir -p diagnostics
+
           /Applications/Xcode_16.4.app/Contents/Developer/usr/bin/safari-web-extension-converter \
             --project-location "$RUNNER_TEMP/SFInspectorTest" \
             --app-name "SF Inspector Test" \
@@ -30,12 +31,13 @@ jobs:
             --force \
             . \
             > diagnostics/converter.txt 2>&1
-          RESULT=$?
+
           cat diagnostics/converter.txt
-          exit "$RESULT"
 
       - name: Fix Bundle Identifiers
         run: |
+          set -e
+
           PROJECT=$(find "$RUNNER_TEMP/SFInspectorTest" -name '*.xcodeproj' -print -quit)
           PBXPROJ="$PROJECT/project.pbxproj"
 
@@ -47,58 +49,215 @@ jobs:
           echo "=== Bundle IDs after correction ==="
           grep -n 'PRODUCT_BUNDLE_IDENTIFIER' "$PBXPROJ"
 
-      - name: Inspect project signing configuration
+      - name: Install profiles and configure signing
+        env:
+          APP_PROFILE_BASE64: ${{ secrets.APP_STORE_PROFILE_BASE64 }}
+          EXT_PROFILE_BASE64: ${{ secrets.EXTENSION_STORE_PROFILE_BASE64 }}
+          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
         run: |
+          set -e
+
           PROJECT=$(find "$RUNNER_TEMP/SFInspectorTest" -name '*.xcodeproj' -print -quit)
           PBXPROJ="$PROJECT/project.pbxproj"
+          PROFILE_DIR="$HOME/Library/MobileDevice/Provisioning Profiles"
 
-          echo "=== Signing configuration ==="
-          grep -nE 'CODE_SIGN_IDENTITY|CODE_SIGN_STYLE|DEVELOPMENT_TEAM|ProvisioningStyle|PROVISIONING_PROFILE' \
-            "$PBXPROJ" || true
+          mkdir -p "$PROFILE_DIR"
+
+          install_profile() {
+            NAME="$1"
+            CONTENT="$2"
+            FILE="$RUNNER_TEMP/$NAME.mobileprovision"
+            PLIST="$RUNNER_TEMP/$NAME.plist"
+
+            if [ -z "$CONTENT" ]; then
+              echo "ERROR: $NAME provisioning profile secret is empty."
+              exit 1
+            fi
+
+            printf '%s' "$CONTENT" | base64 -D > "$FILE"
+            security cms -D -i "$FILE" > "$PLIST"
+
+            UUID=$(/usr/libexec/PlistBuddy -c 'Print UUID' "$PLIST")
+            PROFILE_NAME=$(/usr/libexec/PlistBuddy -c 'Print Name' "$PLIST")
+
+            cp "$FILE" "$PROFILE_DIR/$UUID.mobileprovision"
+
+            echo "$NAME profile installed: $PROFILE_NAME" >&2
+
+            printf '%s\n' "$PROFILE_NAME"
+          }
+
+          APP_PROFILE_PROFILE_NAME=$(install_profile APP_PROFILE "$APP_PROFILE_BASE64")
+          EXT_PROFILE_PROFILE_NAME=$(install_profile EXT_PROFILE "$EXT_PROFILE_BASE64")
+
+          echo "APP_PROFILE_PROFILE_NAME=$APP_PROFILE_PROFILE_NAME" >> "$GITHUB_ENV"
+          echo "EXT_PROFILE_PROFILE_NAME=$EXT_PROFILE_PROFILE_NAME" >> "$GITHUB_ENV"
+
+          python3 - "$PBXPROJ" "$APPLE_TEAM_ID" "$APP_PROFILE_PROFILE_NAME" "$EXT_PROFILE_PROFILE_NAME" <<'PY'
+          import re
+          import sys
+
+          path, team, app_profile, ext_profile = sys.argv[1:]
+
+          if not app_profile or not ext_profile:
+              raise SystemExit("ERROR: A provisioning profile name is empty.")
+
+          with open(path, "r") as f:
+              content = f.read()
+
+          # Find build configuration objects and modify only the
+          # buildSettings section for the application and extension.
+          pattern = re.compile(
+              r'(?ms)^([ \t]*[A-F0-9]{24} /\*.*?\*/ = \{\n)'
+              r'([ \t]*buildSettings = \{\n.*?^[ \t]*\};)'
+          )
+
+          updated = set()
+
+          def update(match):
+              header, settings_block = match.groups()
+
+              bundle_match = re.search(
+                  r'(?m)^[ \t]*PRODUCT_BUNDLE_IDENTIFIER = "?([^";]+)"?;',
+                  settings_block
+              )
+
+              if not bundle_match:
+                  return match.group(0)
+
+              bundle_id = bundle_match.group(1)
+
+              if bundle_id == "com.toprak.extensiontest":
+                  profile = app_profile
+              elif bundle_id == "com.toprak.extensiontest.Extension":
+                  profile = ext_profile
+              else:
+                  return match.group(0)
+
+              updated.add(bundle_id)
+
+              values = {
+                  "CODE_SIGN_STYLE": "Manual",
+                  "CODE_SIGN_IDENTITY": '"Apple Distribution"',
+                  "DEVELOPMENT_TEAM": team,
+                  "PROVISIONING_PROFILE_SPECIFIER": '"' + profile + '"',
+              }
+
+              for key, value in values.items():
+                  setting = re.compile(
+                      r'(?m)^([ \t]*)' + re.escape(key) + r' = .*?;[ \t]*$'
+                  )
+
+                  replacement = lambda m: (
+                      m.group(1) + key + " = " + value + ";"
+                  )
+
+                  if setting.search(settings_block):
+                      settings_block = setting.sub(
+                          replacement, settings_block
+                      )
+                  else:
+                      marker = re.search(
+                          r'(?m)^([ \t]*)PRODUCT_BUNDLE_IDENTIFIER = ',
+                          settings_block
+                      )
+
+                      if not marker:
+                          raise SystemExit(
+                              "ERROR: Cannot add " + key +
+                              " for " + bundle_id
+                          )
+
+                      indent = marker.group(1)
+                      settings_block = (
+                          settings_block[:marker.start()]
+                          + indent + key + " = " + value + ";\n"
+                          + settings_block[marker.start():]
+                      )
+
+              return header + settings_block
+
+          content = pattern.sub(update, content)
+
+          required = {
+              "com.toprak.extensiontest",
+              "com.toprak.extensiontest.Extension",
+          }
+
+          missing = required - updated
+
+          if missing:
+              raise SystemExit(
+                  "ERROR: No build configuration updated for: "
+                  + ", ".join(sorted(missing))
+              )
+
+          with open(path, "w") as f:
+              f.write(content)
+
+          print("Signing configuration updated.")
+          print("Updated bundle IDs:", ", ".join(sorted(updated)))
+          PY
+
+          echo "=== Verify signing configuration ==="
+          grep -nE 'PRODUCT_BUNDLE_IDENTIFIER|CODE_SIGN_IDENTITY|CODE_SIGN_STYLE|DEVELOPMENT_TEAM|PROVISIONING_PROFILE_SPECIFIER' \
+            "$PBXPROJ"
 
       - name: Find Xcode project and scheme
         run: |
+          set -e
+
           PROJECT=$(find "$RUNNER_TEMP/SFInspectorTest" -name '*.xcodeproj' -print -quit)
+
           if [ -z "$PROJECT" ]; then
             echo "Xcode project not found" | tee diagnostics/build.txt
             exit 1
           fi
 
           echo "Project: $PROJECT" | tee diagnostics/build.txt
+
           xcodebuild -list -json -project "$PROJECT" \
-            > diagnostics/project-list.json 2>> diagnostics/build.txt
+            > diagnostics/project-list.json \
+            2>> diagnostics/build.txt
 
           SCHEME=$(python3 -c \
             'import json; d=json.load(open("diagnostics/project-list.json")); print(d["project"]["schemes"][0])')
 
           echo "Scheme: $SCHEME" | tee -a diagnostics/build.txt
+
           echo "$PROJECT" > diagnostics/project-path.txt
           echo "$SCHEME" > diagnostics/scheme.txt
 
       - name: Inspect generated project targets
         run: |
+          set -e
+
           PROJECT=$(cat diagnostics/project-path.txt)
 
           xcodebuild -list -project "$PROJECT" \
             | tee diagnostics/targets.txt
 
           echo "=== Project target definitions ==="
+
           grep -nE 'PBXNativeTarget|PRODUCT_BUNDLE_IDENTIFIER|appex|SafariWebExtension' \
             "$PROJECT/project.pbxproj" \
             | tee diagnostics/target-details.txt
 
       - name: Inspect signing targets
         run: |
+          set -e
+
           PROJECT=$(cat diagnostics/project-path.txt)
 
           for TARGET in "SF Inspector Test" "SF Inspector Test Extension"; do
             echo "=== $TARGET ==="
+
             xcodebuild \
               -project "$PROJECT" \
               -target "$TARGET" \
               -showBuildSettings \
               2>/dev/null \
-              | grep -E 'PRODUCT_BUNDLE_IDENTIFIER =|PRODUCT_NAME =|PRODUCT_TYPE =|CODE_SIGN_STYLE ='
+              | grep -E 'PRODUCT_BUNDLE_IDENTIFIER =|PRODUCT_NAME =|PRODUCT_TYPE =|CODE_SIGN_STYLE =|CODE_SIGN_IDENTITY =|PROVISIONING_PROFILE_SPECIFIER =|DEVELOPMENT_TEAM ='
           done
 
       - name: Build for iOS Simulator
@@ -107,6 +266,7 @@ jobs:
           SCHEME=$(cat diagnostics/scheme.txt)
 
           set +e
+
           xcodebuild \
             -project "$PROJECT" \
             -scheme "$SCHEME" \
@@ -115,32 +275,44 @@ jobs:
             -destination 'generic/platform=iOS Simulator' \
             CODE_SIGNING_ALLOWED=NO \
             build > diagnostics/build-output.txt 2>&1
+
           RESULT=$?
 
           tail -n 100 diagnostics/build-output.txt
+
           echo "Build exit code: $RESULT" | tee diagnostics/build-result.txt
+
           exit "$RESULT"
 
       - name: Prepare signing credentials
         env:
           APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPSTORE_API_PRIVATE_KEY: ${{ secrets.APPSTORE_API_PRIVATE_KEY }}
-          APPSTORE_API_KEY_ID: ${{ vars.APPSTORE_API_KEY_ID }}
         run: |
           set -e
 
           KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain-db"
           KEYCHAIN_PASSWORD="$(openssl rand -hex 24)"
           P12_PATH="$RUNNER_TEMP/apple_distribution.p12"
-          API_KEY_PATH="$RUNNER_TEMP/AuthKey_${APPSTORE_API_KEY_ID}.p8"
 
-          echo "$APPLE_CERTIFICATE_P12" | base64 -D > "$P12_PATH"
-          printf '%s' "$APPSTORE_API_PRIVATE_KEY" > "$API_KEY_PATH"
+          if [ -z "$APPLE_CERTIFICATE_P12" ] || [ -z "$APPLE_CERTIFICATE_PASSWORD" ]; then
+            echo "ERROR: Apple Distribution certificate secret is empty."
+            exit 1
+          fi
 
-          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          printf '%s' "$APPLE_CERTIFICATE_P12" | base64 -D > "$P12_PATH"
+
+          security create-keychain \
+            -p "$KEYCHAIN_PASSWORD" \
+            "$KEYCHAIN_PATH"
+
+          security set-keychain-settings \
+            -lut 21600 \
+            "$KEYCHAIN_PATH"
+
+          security unlock-keychain \
+            -p "$KEYCHAIN_PASSWORD" \
+            "$KEYCHAIN_PATH"
 
           security import "$P12_PATH" \
             -k "$KEYCHAIN_PATH" \
@@ -150,17 +322,23 @@ jobs:
 
           security set-key-partition-list \
             -S apple-tool:,apple:,codesign: \
-            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+            -s \
+            -k "$KEYCHAIN_PASSWORD" \
+            "$KEYCHAIN_PATH"
 
-          security list-keychains -d user -s "$KEYCHAIN_PATH"
+          security list-keychains \
+            -d user \
+            -s "$KEYCHAIN_PATH"
 
-          echo "API_KEY_PATH=$API_KEY_PATH" >> "$GITHUB_ENV"
+          security default-keychain \
+            -d user \
+            -s "$KEYCHAIN_PATH"
+
+          echo "Apple Distribution certificate imported."
 
       - name: Archive and export IPA
         env:
           APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
-          APPSTORE_API_KEY_ID: ${{ vars.APPSTORE_API_KEY_ID }}
-          APPSTORE_ISSUER_ID: ${{ vars.APPSTORE_ISSUER_ID }}
         run: |
           set -e
 
@@ -168,6 +346,12 @@ jobs:
           SCHEME=$(cat diagnostics/scheme.txt)
           ARCHIVE_PATH="$RUNNER_TEMP/SFInspectorTest.xcarchive"
           EXPORT_PATH="$RUNNER_TEMP/export"
+
+          if [ -z "$APP_PROFILE_PROFILE_NAME" ] || [ -z "$EXT_PROFILE_PROFILE_NAME" ]; then
+            echo "ERROR: Provisioning profile names are missing."
+            exit 1
+          fi
+
           mkdir -p "$EXPORT_PATH"
 
           cat > "$RUNNER_TEMP/ExportOptions.plist" <<EOF
@@ -180,10 +364,21 @@ jobs:
               <key>teamID</key>
               <string>${APPLE_TEAM_ID}</string>
               <key>signingStyle</key>
-              <string>automatic</string>
+              <string>manual</string>
+              <key>provisioningProfiles</key>
+              <dict>
+                  <key>com.toprak.extensiontest</key>
+                  <string>${APP_PROFILE_PROFILE_NAME}</string>
+                  <key>com.toprak.extensiontest.Extension</key>
+                  <string>${EXT_PROFILE_PROFILE_NAME}</string>
+              </dict>
           </dict>
           </plist>
           EOF
+
+          plutil -lint "$RUNNER_TEMP/ExportOptions.plist"
+
+          echo "=== Archive ==="
 
           xcodebuild \
             -project "$PROJECT" \
@@ -191,23 +386,17 @@ jobs:
             -configuration Release \
             -destination 'generic/platform=iOS' \
             -archivePath "$ARCHIVE_PATH" \
-            -allowProvisioningUpdates \
-            -authenticationKeyPath "$API_KEY_PATH" \
-            -authenticationKeyID "$APPSTORE_API_KEY_ID" \
-            -authenticationKeyIssuerID "$APPSTORE_ISSUER_ID" \
             DEVELOPMENT_TEAM="$APPLE_TEAM_ID" \
-            CODE_SIGN_STYLE=Automatic \
+            CODE_SIGN_STYLE=Manual \
             archive
+
+          echo "=== Export IPA ==="
 
           xcodebuild \
             -exportArchive \
             -archivePath "$ARCHIVE_PATH" \
             -exportPath "$EXPORT_PATH" \
-            -exportOptionsPlist "$RUNNER_TEMP/ExportOptions.plist" \
-            -allowProvisioningUpdates \
-            -authenticationKeyPath "$API_KEY_PATH" \
-            -authenticationKeyID "$APPSTORE_API_KEY_ID" \
-            -authenticationKeyIssuerID "$APPSTORE_ISSUER_ID"
+            -exportOptionsPlist "$RUNNER_TEMP/ExportOptions.plist"
 
           echo "=== Exported IPA ==="
           ls -lh "$EXPORT_PATH"
