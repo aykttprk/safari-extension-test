@@ -82,17 +82,15 @@ jobs:
         run: |
           PROJECT=$(cat diagnostics/project-path.txt)
 
-          xcodebuild \
-            -project "$PROJECT" \
-            -scheme "$(cat diagnostics/scheme.txt)" \
-            -showBuildSettings \
-            > diagnostics/signing-settings.txt 2>&1
-
-          grep -E \
-            '(^| )PRODUCT_BUNDLE_IDENTIFIER =|(^| )PRODUCT_NAME =|(^| )PRODUCT_TYPE =|(^| )DEVELOPMENT_TEAM =|(^| )CODE_SIGN_STYLE =' \
-            diagnostics/signing-settings.txt \
-            | sort -u \
-            | tee diagnostics/signing-summary.txt
+          for TARGET in "SF Inspector Test" "SF Inspector Test Extension"; do
+            echo "=== $TARGET ==="
+            xcodebuild \
+              -project "$PROJECT" \
+              -target "$TARGET" \
+              -showBuildSettings \
+              2>/dev/null \
+              | grep -E 'PRODUCT_BUNDLE_IDENTIFIER =|PRODUCT_NAME =|PRODUCT_TYPE =|CODE_SIGN_STYLE ='
+          done
 
       - name: Build for iOS Simulator
         run: |
