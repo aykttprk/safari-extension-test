@@ -55,36 +55,42 @@ jobs:
           EXT_PROFILE_BASE64: ${{ secrets.EXTENSION_STORE_PROFILE_BASE64 }}
           APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
         run: |
-          set -e
+          set -euo pipefail
 
           PROJECT=$(find "$RUNNER_TEMP/SFInspectorTest" -name '*.xcodeproj' -print -quit)
+
+          if [ -z "$PROJECT" ]; then
+            echo "ERROR: Xcode project not found."
+            exit 1
+          fi
+
           PBXPROJ="$PROJECT/project.pbxproj"
           PROFILE_DIR="$HOME/Library/MobileDevice/Provisioning Profiles"
-
           mkdir -p "$PROFILE_DIR"
 
           install_profile() {
-            NAME="$1"
-            CONTENT="$2"
-            FILE="$RUNNER_TEMP/$NAME.mobileprovision"
-            PLIST="$RUNNER_TEMP/$NAME.plist"
+            local name="$1"
+            local content="$2"
+            local file="$RUNNER_TEMP/$name.mobileprovision"
+            local plist="$RUNNER_TEMP/$name.plist"
 
-            if [ -z "$CONTENT" ]; then
-              echo "ERROR: $NAME provisioning profile secret is empty."
+            if [ -z "$content" ]; then
+              echo "ERROR: $name provisioning profile secret is empty."
               exit 1
             fi
 
-            printf '%s' "$CONTENT" | base64 -D > "$FILE"
-            security cms -D -i "$FILE" > "$PLIST"
+            printf '%s' "$content" | base64 -D > "$file"
+            security cms -D -i "$file" > "$plist"
 
-            UUID=$(/usr/libexec/PlistBuddy -c 'Print UUID' "$PLIST")
-            PROFILE_NAME=$(/usr/libexec/PlistBuddy -c 'Print Name' "$PLIST")
+            local uuid
+            local profile_name
+            uuid=$(/usr/libexec/PlistBuddy -c 'Print UUID' "$plist")
+            profile_name=$(/usr/libexec/PlistBuddy -c 'Print Name' "$plist")
 
-            cp "$FILE" "$PROFILE_DIR/$UUID.mobileprovision"
+            cp "$file" "$PROFILE_DIR/$uuid.mobileprovision"
 
-            echo "$NAME profile installed: $PROFILE_NAME" >&2
-
-            printf '%s\n' "$PROFILE_NAME"
+            echo "$name profile installed: $profile_name" >&2
+            printf '%s' "$profile_name"
           }
 
           APP_PROFILE_PROFILE_NAME=$(install_profile APP_PROFILE "$APP_PROFILE_BASE64")
@@ -99,104 +105,190 @@ jobs:
 
           path, team, app_profile, ext_profile = sys.argv[1:]
 
-          if not app_profile or not ext_profile:
-              raise SystemExit("ERROR: A provisioning profile name is empty.")
-
           with open(path, "r") as f:
               content = f.read()
 
-          # Find build configuration objects and modify only the
-          # buildSettings section for the application and extension.
-          pattern = re.compile(
-              r'(?ms)^([ \t]*[A-F0-9]{24} /\*.*?\*/ = \{\n)'
-              r'([ \t]*buildSettings = \{\n.*?^[ \t]*\};)'
-          )
+          targets = {
+              "SF Inspector Test": (
+                  "com.toprak.extensiontest",
+                  app_profile,
+              ),
+              "SF Inspector Test Extension": (
+                  "com.toprak.extensiontest.Extension",
+                  ext_profile,
+              ),
+          }
 
-          updated = set()
+          def get_objects(text):
+              objects = {}
+              marker = re.search(r'(?m)^[ \t]*objects = \{\s*$', text)
+              if not marker:
+                  raise SystemExit("ERROR: PBX objects section not found.")
 
-          def update(match):
-              header, settings_block = match.groups()
+              start = marker.end()
+              end = text.find("\n\t};", start)
+              if end == -1:
+                  raise SystemExit("ERROR: PBX objects section end not found.")
+
+              section = text[start:end]
+              pattern = re.compile(
+                  r'(?ms)^[ \t]*([A-F0-9]{24}) /\*.*?\*/ = \{\n.*?^[ \t]*\};'
+              )
+
+              for match in pattern.finditer(section):
+                  objects[match.group(1)] = match.group(0)
+
+              return objects
+
+          objects = get_objects(content)
+
+          target_config_ids = {}
+
+          for object_id, block in objects.items():
+              if "isa = PBXNativeTarget;" not in block:
+                  continue
+
+              name_match = re.search(r'\bname = "([^"]+)";', block)
+              if not name_match:
+                  continue
+
+              target_name = name_match.group(1)
+              if target_name not in targets:
+                  continue
+
+              config_match = re.search(
+                  r'(?s)buildConfigurationList = ([A-F0-9]{24})',
+                  block,
+              )
+              if not config_match:
+                  raise SystemExit(
+                      f"ERROR: Build configuration list not found for {target_name}"
+                  )
+
+              target_config_ids[target_name] = config_match.group(1)
+
+          if set(target_config_ids) != set(targets):
+              missing = set(targets) - set(target_config_ids)
+              raise SystemExit(
+                  "ERROR: Targets not found: " + ", ".join(sorted(missing))
+              )
+
+          list_to_configs = {}
+
+          for object_id, block in objects.items():
+              if "isa = XCConfigurationList;" not in block:
+                  continue
+
+              match = re.search(r'(?s)buildConfigurations = \((.*?)\);', block)
+              if match:
+                  ids = re.findall(r'([A-F0-9]{24}) /\*', match.group(1))
+                  list_to_configs[object_id] = ids
+
+          configs_to_update = {}
+
+          for target_name, list_id in target_config_ids.items():
+              if list_id not in list_to_configs:
+                  raise SystemExit(
+                      f"ERROR: Configuration list missing for {target_name}"
+                  )
+
+              bundle_id, profile_name = targets[target_name]
+
+              for config_id in list_to_configs[list_id]:
+                  if config_id not in objects:
+                      raise SystemExit(
+                          f"ERROR: Build configuration {config_id} not found"
+                      )
+
+                  configs_to_update[config_id] = (
+                      target_name, bundle_id, profile_name
+                  )
+
+          def set_setting(block, key, value):
+              line = re.compile(
+                  r'(?m)^([ \t]*)' + re.escape(key) + r' = .*?;[ \t]*$'
+              )
+              replacement = lambda m: m.group(1) + key + " = " + value + ";"
+
+              if line.search(block):
+                  return line.sub(replacement, block)
+
+              marker = re.search(
+                  r'(?m)^([ \t]*)PRODUCT_BUNDLE_IDENTIFIER = ',
+                  block,
+              )
+              if not marker:
+                  raise SystemExit(
+                      "ERROR: PRODUCT_BUNDLE_IDENTIFIER missing in configuration"
+                  )
+
+              indent = marker.group(1)
+              return (
+                  block[:marker.start()]
+                  + indent + key + " = " + value + ";\n"
+                  + block[marker.start():]
+              )
+
+          for config_id, (target_name, bundle_id, profile_name) in configs_to_update.items():
+              block = objects[config_id]
+
+              settings_match = re.search(
+                  r'(?ms)^([ \t]*buildSettings = \{\n)(.*?)(^[ \t]*\};)',
+                  block,
+              )
+
+              if not settings_match:
+                  raise SystemExit(
+                      f"ERROR: buildSettings not found for {target_name} ({config_id})"
+                  )
+
+              prefix, settings, suffix = settings_match.groups()
 
               bundle_match = re.search(
                   r'(?m)^[ \t]*PRODUCT_BUNDLE_IDENTIFIER = "?([^";]+)"?;',
-                  settings_block
+                  settings,
               )
 
               if not bundle_match:
-                  return match.group(0)
+                  raise SystemExit(
+                      f"ERROR: Bundle ID missing for {target_name} ({config_id})"
+                  )
 
-              bundle_id = bundle_match.group(1)
+              actual_bundle = bundle_match.group(1)
 
-              if bundle_id == "com.toprak.extensiontest":
-                  profile = app_profile
-              elif bundle_id == "com.toprak.extensiontest.Extension":
-                  profile = ext_profile
-              else:
-                  return match.group(0)
+              if actual_bundle != bundle_id:
+                  raise SystemExit(
+                      f"ERROR: Unexpected bundle ID for {target_name}: {actual_bundle}"
+                  )
 
-              updated.add(bundle_id)
-
-              values = {
+              settings_values = {
                   "CODE_SIGN_STYLE": "Manual",
                   "CODE_SIGN_IDENTITY": '"Apple Distribution"',
                   "DEVELOPMENT_TEAM": team,
-                  "PROVISIONING_PROFILE_SPECIFIER": '"' + profile + '"',
+                  "PROVISIONING_PROFILE_SPECIFIER": '"' + profile_name + '"',
               }
 
-              for key, value in values.items():
-                  setting = re.compile(
-                      r'(?m)^([ \t]*)' + re.escape(key) + r' = .*?;[ \t]*$'
-                  )
+              for key, value in settings_values.items():
+                  settings = set_setting(settings, key, value)
 
-                  replacement = lambda m: (
-                      m.group(1) + key + " = " + value + ";"
-                  )
+              new_block = (
+                  block[:settings_match.start()]
+                  + prefix + settings + suffix
+                  + block[settings_match.end():]
+              )
 
-                  if setting.search(settings_block):
-                      settings_block = setting.sub(
-                          replacement, settings_block
-                      )
-                  else:
-                      marker = re.search(
-                          r'(?m)^([ \t]*)PRODUCT_BUNDLE_IDENTIFIER = ',
-                          settings_block
-                      )
+              objects[config_id] = new_block
+              content = content.replace(block, new_block, 1)
 
-                      if not marker:
-                          raise SystemExit(
-                              "ERROR: Cannot add " + key +
-                              " for " + bundle_id
-                          )
-
-                      indent = marker.group(1)
-                      settings_block = (
-                          settings_block[:marker.start()]
-                          + indent + key + " = " + value + ";\n"
-                          + settings_block[marker.start():]
-                      )
-
-              return header + settings_block
-
-          content = pattern.sub(update, content)
-
-          required = {
-              "com.toprak.extensiontest",
-              "com.toprak.extensiontest.Extension",
-          }
-
-          missing = required - updated
-
-          if missing:
-              raise SystemExit(
-                  "ERROR: No build configuration updated for: "
-                  + ", ".join(sorted(missing))
+              print(
+                  f"Configured {target_name}: {bundle_id}, "
+                  f"profile={profile_name}"
               )
 
           with open(path, "w") as f:
               f.write(content)
 
-          print("Signing configuration updated.")
-          print("Updated bundle IDs:", ", ".join(sorted(updated)))
+          print("Signing configuration updated successfully.")
           PY
 
           echo "=== Verify signing configuration ==="
