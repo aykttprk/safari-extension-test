@@ -19,7 +19,6 @@ jobs:
         run: |
           mkdir -p diagnostics
           /Applications/Xcode_16.4.app/Contents/Developer/usr/bin/safari-web-extension-converter \
-            . \
             --project-location "$RUNNER_TEMP/SFInspectorTest" \
             --app-name "SF Inspector Test" \
             --bundle-identifier "com.toprak.extensiontest" \
@@ -29,6 +28,7 @@ jobs:
             --no-open \
             --no-prompt \
             --force \
+            . \
             > diagnostics/converter.txt 2>&1
           RESULT=$?
           cat diagnostics/converter.txt
