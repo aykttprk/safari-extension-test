@@ -1,6 +1,6 @@
 {
   "name": "Salesforce Inspector Ultra",
-  "description": "Productivity tools for Salesforce administrators and developers to inspect data and metadata directly from the Salesforce UI.",
+  "description": "Productivity tools for Salesforce administrators and developers to inspect data and metadata.",
   "version": "2.1.0",
   "version_name": "2.1",
   "icons": {
